@@ -122,7 +122,7 @@ canvas{position:fixed;inset:0;display:block}
 <canvas id="ov2d"></canvas>
 <div id="vg"></div>
 <div id="lowhp"></div>
-<div id="glerr">⚠️ Ce jeu nécessite WebGL.<br>Ouvre-le dans un navigateur récent (Chrome, Safari, Firefox).</div>
+<div id="glerr">⚠️ Ce jeu nécessite WebGL.<br><span style="font-size:12px;opacity:.9">— Mets à jour Chrome / Android System WebView depuis le Play Store<br>— Désactive le mode Économie de données (Lite mode)<br>— Redémarre le téléphone puis recharge la page</span><div id="glerr-diag" style="font-size:11px;opacity:.65;margin-top:14px;max-width:92vw;user-select:all;word-break:break-all"></div></div>
 
 <div id="hud">
   <div class="hudBox" id="hpwrap">
@@ -340,9 +340,14 @@ function resize(){
   if(gl){ try{ gl.viewport(0,0,cv.width,cv.height); if(GLOK) mkBloom(); }catch(e){} }
 }
 window.addEventListener("resize", resize);
+cv.addEventListener("webglcontextlost", function(e){
+  e.preventDefault(); GLOK=false;
+  try{ $("glerr").style.display="flex"; var d=$("glerr-diag"); if(d) d.textContent="Contexte WebGL perdu (GPU saturé ou driver). Recharge la page."; }catch(ex){}
+});
+cv.addEventListener("webglcontextrestored", function(){ location.reload(); });
 
 /* ===== Moteur 3D WebGL (zéro dépendance) ===== */
-var gl=null, GLOK=false, glP=null, glP2=null, glVA=null, glBA=null, glGA=null;
+var gl=null, GLOK=false, GLERR="", glP=null, glP2=null, glVA=null, glBA=null, glGA=null;
 var uVP=null,uCam=null,uLD=null,uFog=null,uFr=null,uSun=null,uAmbS=null,uAmbG=null,uRim=null,uCon=null,uSat=null,uTint=null;
 var u2VP=null,u2Cam=null,u2Fog=null,u2Fr=null;
 var glPt=null, glBl=null, uBlT=null, uBlDir=null, uCpT=null;
@@ -362,24 +367,36 @@ function bindAttribs(){
 }
 function initGL(){
   try{
-    gl = cv.getContext("webgl",{antialias:true,alpha:false});
-    if(!gl) gl = cv.getContext("experimental-webgl",{antialias:true,alpha:false});
-    if(!gl) return false;
+    var ctxTries=[
+      ["webgl",{antialias:false,alpha:false,powerPreference:"high-performance",failIfMajorPerformanceCaveat:false}],
+      ["experimental-webgl",{antialias:false,alpha:false,powerPreference:"high-performance",failIfMajorPerformanceCaveat:false}],
+      ["webgl",{antialias:false,alpha:false}],
+      ["experimental-webgl",{antialias:false,alpha:false}],
+      ["webgl",{}]
+    ];
+    for(var ci=0; ci<ctxTries.length && !gl; ci++){
+      try{ gl=cv.getContext(ctxTries[ci][0],ctxTries[ci][1]); }catch(e){ }
+    }
+    if(!gl){ GLERR="Aucun contexte WebGL obtenu : getContext('webgl') a renvoyé null (GPU bloqué, désactivé ou mode Lite)."; return false; }
     var vsrc="attribute vec3 aP;attribute vec3 aN;attribute vec3 aC;attribute float aL;attribute float aA;uniform mat4 uVP;uniform vec3 uCam;varying vec3 vN;varying vec3 vC;varying vec3 vV;varying float vL;varying float vA;varying float vD;void main(){gl_Position=uVP*vec4(aP,1.0);vN=aN;vC=aC;vV=uCam-aP;vL=aL;vA=aA;vD=distance(aP,uCam);}";
     var fsrc="precision mediump float;varying vec3 vN;varying vec3 vC;varying vec3 vV;varying float vL;varying float vA;varying float vD;uniform vec3 uLD;uniform vec3 uFog;uniform vec2 uFr;uniform vec3 uSun;uniform vec3 uAmbS;uniform vec3 uAmbG;uniform vec3 uRim;uniform float uCon;uniform float uSat;uniform vec3 uTint;void main(){vec3 N=normalize(vN);vec3 V=normalize(vV);float df=max(dot(N,uLD),0.0);vec3 amb=mix(uAmbG,uAmbS,N.y*0.5+0.5);vec3 lit=vC*(amb*1.3+uSun*df);vec3 H=normalize(uLD+V);float sp=pow(max(dot(N,H),0.0),24.0)*0.20*vL;float rim=pow(1.0-abs(dot(N,V)),3.0);vec3 col=mix(vC,lit+uRim*rim*0.22+vec3(sp),vL);col=mix(col,uFog,smoothstep(uFr.x,uFr.y,vD));col=pow(col,vec3(0.92));col=(col-0.5)*uCon+0.5;float lg=dot(col,vec3(0.299,0.587,0.114));col=max(mix(vec3(lg),col,uSat)*uTint,0.0);gl_FragColor=vec4(col,vA);}";
     var fsrc2="precision mediump float;varying vec3 vC;varying float vL;varying float vA;varying float vD;uniform vec3 uFog;uniform vec2 uFr;void main(){float fg=smoothstep(uFr.x,uFr.y,vD);vec3 col=vC*vL*(1.0-fg*0.85);gl_FragColor=vec4(col,vA);}";
     function sh(t,sr){
       var o=gl.createShader(t); gl.shaderSource(o,sr); gl.compileShader(o);
-      if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)) return null;
+      if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)){
+        GLERR="Compilation shader "+(t===gl.VERTEX_SHADER?"vertex":"fragment")+" : "+gl.getShaderInfoLog(o);
+        return null;
+      }
       return o;
     }
     function prog(fs){
       var p=gl.createProgram();
       gl.bindAttribLocation(p,0,"aP"); gl.bindAttribLocation(p,1,"aN");
-      gl.bindAttribLocation(p,2,"aC"); gl.bindAttribLocation(p,3,"aL"); gl.bindAttribLocation(p,4,"aA");
+      gl.bindAttribLocation(p,2,"aC"); gl.bindAttribLocation(p,3,"aL");
+      gl.bindAttribLocation(p,4,"aA");
       gl.attachShader(p,sh(gl.VERTEX_SHADER,vsrc)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
       gl.linkProgram(p);
-      if(!gl.getProgramParameter(p,gl.LINK_STATUS)) return null;
+      if(!gl.getProgramParameter(p,gl.LINK_STATUS)){ GLERR="Édition de liens du programme : "+gl.getProgramInfoLog(p); return null; }
       return p;
     }
     var p=prog(fsrc), p2=prog(fsrc2);
@@ -421,7 +438,7 @@ function initGL(){
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
     gl.clearColor(0.07,0.08,0.05,1);
     return true;
-  }catch(e){ return false; }
+  }catch(e){ GLERR="Exception à l'init WebGL : "+(e&&e.message?e.message:e); return false; }
 }
 
 /* ---------- Bloom (rendu vers texture quart-résolution + flou gaussien) ---------- */
@@ -2384,7 +2401,10 @@ document.addEventListener("visibilitychange", function(){
 resize();
 GLOK=initGL();
 mkGrain();
-if(!GLOK && window.WebGLRenderingContext){ $("glerr").style.display="flex"; }
+if(!GLOK){
+  $("glerr").style.display="flex";
+  try{ var gdiag=$("glerr-diag"); if(gdiag) gdiag.textContent="Diagnostic : "+(GLERR||"WebGL indisponible sur cet appareil."); }catch(e){}
+}
 $("btnSound").textContent=META.sound?"🔊 Son":"🔇 Son";
 refreshTitle();
 showScr("title");
