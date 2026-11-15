@@ -350,8 +350,9 @@ cv.addEventListener("webglcontextrestored", function(){ location.reload(); });
 var gl=null, GLOK=false, GLERR="", GLFB=0, glP=null, glP2=null, glVA=null, glBA=null, glGA=null;
 var uVP=null,uCam=null,uLD=null,uFog=null,uFr=null,uSun=null,uAmbS=null,uAmbG=null,uRim=null,uCon=null,uSat=null,uTint=null;
 var u2VP=null,u2Cam=null,u2Fog=null,u2Fr=null;
-var glPt=null, glBl=null, uBlT=null, uBlDir=null, uCpT=null;
+var glPt=null, glBl=null, glCp=null, uBlT=null, uBlDir=null, uCpT=null, uCpB=null, uCpF=null;
 var quadBuf=null, BW=0, BH=0, fbA=null, fbB=null, txA=null, txB=null;
+var fbS=null, txS=null, rbS=null, PW=0, PH=0;
 var aPos=0,aNor=1,aCol=2,aLit=3,aAlp=4;
 var FOV=0.96, FOVC=0.96, NEAR=6, FAR=2600;
 var VA=new Float32Array(280000), VN=0;
@@ -438,7 +439,8 @@ function initGL(){
     /* --- programmes post-traitement (bloom) --- */
     var vpost="attribute vec2 aP;varying vec2 vUV;void main(){gl_Position=vec4(aP,0.0,1.0);vUV=aP*0.5+0.5;}";
     var fblur="precision mediump float;varying vec2 vUV;uniform sampler2D uT;uniform vec2 uDir;void main(){vec3 c=texture2D(uT,vUV)*0.1633;c+=texture2D(uT,vUV-uDir*4.0)*0.051;c+=texture2D(uT,vUV-uDir*3.0)*0.0918;c+=texture2D(uT,vUV-uDir*2.0)*0.12245;c+=texture2D(uT,vUV-uDir)*0.1531;c+=texture2D(uT,vUV+uDir)*0.1531;c+=texture2D(uT,vUV+uDir*2.0)*0.12245;c+=texture2D(uT,vUV+uDir*3.0)*0.0918;c+=texture2D(uT,vUV+uDir*4.0)*0.051;gl_FragColor=vec4(c,1.0);}";
-    var fcomp="precision mediump float;varying vec2 vUV;uniform sampler2D uT;void main(){vec4 c=texture2D(uT,vUV);gl_FragColor=vec4(c.rgb*0.85,1.0);}";
+    var fcomp="precision mediump float;varying vec2 vUV;uniform sampler2D uT;uniform sampler2D uB;void main(){vec3 c=texture2D(uT,vUV).rgb+texture2D(uB,vUV).rgb*0.55;vec2 q=vUV-0.5;c*=1.0-dot(q,q)*0.55;gl_FragColor=vec4(c,1.0);}";
+    var fcopy="precision mediump float;varying vec2 vUV;uniform sampler2D uT;void main(){vec3 c=texture2D(uT,vUV).rgb;vec2 q=vUV-0.5;c*=1.0-dot(q,q)*0.55;gl_FragColor=vec4(c,1.0);}";
     function progp(fs){
       var v=sh(gl.VERTEX_SHADER,vpost), f=sh(gl.FRAGMENT_SHADER,fs);
       if(!v||!f) return null;
@@ -449,9 +451,10 @@ function initGL(){
       if(!gl.getProgramParameter(pp,gl.LINK_STATUS)){ var m3="Édition de liens post : "+String(gl.getProgramInfoLog(pp)).slice(0,300); glog+=(glog?" | ":"")+m3; GLERR=m3; return null; }
       return pp;
     }
-    glPt=progp(fblur); glBl=progp(fcomp);
+    glPt=progp(fblur); glBl=progp(fcomp); glCp=progp(fcopy);
     if(glPt){ uBlT=gl.getUniformLocation(glPt,"uT"); uBlDir=gl.getUniformLocation(glPt,"uDir"); }
-    if(glBl){ uCpT=gl.getUniformLocation(glBl,"uT"); }
+    if(glBl){ uCpT=gl.getUniformLocation(glBl,"uT"); uCpB=gl.getUniformLocation(glBl,"uB"); }
+    if(glCp){ uCpF=gl.getUniformLocation(glCp,"uT"); }
     quadBuf=gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]),gl.STATIC_DRAW);
@@ -468,25 +471,39 @@ function initGL(){
 function mkBloom(){
   try{
     if(!gl) return;
-    BW=Math.max(2,Math.floor(cw/4)); BH=Math.max(2,Math.floor(ch/4));
+    /* résolution interne « pixel-art » : ~3 pixels device par pixel de jeu */
+    PW=Math.max(160,Math.min(520,Math.round(cv.width/3)));
+    PH=Math.max(2,Math.round(PW*cv.height/Math.max(1,cv.width)));
+    BW=Math.max(2,Math.floor(PW/2)); BH=Math.max(2,Math.floor(PH/2));
     if(txA){ gl.deleteTexture(txA); gl.deleteTexture(txB); gl.deleteFramebuffer(fbA); gl.deleteFramebuffer(fbB); }
-    function mkT(){
+    if(txS){ gl.deleteTexture(txS); gl.deleteFramebuffer(fbS); gl.deleteRenderbuffer(rbS); }
+    function mkT(w,h,nearest){
       var t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER, nearest?gl.NEAREST:gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER, nearest?gl.NEAREST:gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
-      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,BW,BH,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
       return t;
     }
-    txA=mkT(); txB=mkT();
+    txA=mkT(BW,BH,false); txB=mkT(BW,BH,false);
     fbA=gl.createFramebuffer(); fbB=gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER,fbA);
     gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,txA,0);
     gl.bindFramebuffer(gl.FRAMEBUFFER,fbB);
     gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,txB,0);
+    /* FBO scène basse résolution avec depth buffer : le look pixel-art */
+    txS=mkT(PW,PH,true);
+    rbS=gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER,rbS);
+    gl.renderbufferStorage(gl.RENDERBUFFER,gl.DEPTH_COMPONENT16,PW,PH);
+    fbS=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,fbS);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,txS,0);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.RENDERBUFFER,rbS);
+    if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){ fbS=null; }
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-  }catch(e){ fbA=null; }
+  }catch(e){ fbA=null; fbS=null; }
 }
 function postPass(prog,srcTex,dx,dy,fb,w,h,add){
   gl.bindFramebuffer(gl.FRAMEBUFFER,fb);
@@ -505,6 +522,27 @@ function postPass(prog,srcTex,dx,dy,fb,w,h,add){
   if(add){ gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE); }
   gl.drawArrays(gl.TRIANGLES,0,6);
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+}
+/* composite plein écran : upscale pixel-net de la scène + bloom + vignette */
+function compPass(prog){
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,cv.width,cv.height);
+  gl.useProgram(prog);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.disableVertexAttribArray(1); gl.disableVertexAttribArray(2); gl.disableVertexAttribArray(3); gl.disableVertexAttribArray(4);
+  gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
+  gl.vertexAttribPointer(0,2,gl.FLOAT,false,8,0);
+  gl.enableVertexAttribArray(0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,txS);
+  gl.uniform1i(prog===glBl?uCpT:uCpF,0);
+  if(prog===glBl){
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D,txA);
+    gl.uniform1i(uCpB,1);
+  }
+  gl.drawArrays(gl.TRIANGLES,0,6);
 }
 
 /* ---------- Math 3D ---------- */
@@ -2204,9 +2242,16 @@ function buildScene(A){
 function renderGL(A){
   try{
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);
-    gl.viewport(0,0,cv.width,cv.height);
     var fc=C3(A.fog);
     gl.clearColor(fc[0],fc[1],fc[2],1);
+    /* DA pixel-art : la scène est rendue en basse résolution puis agrandie */
+    var pix = fbS && (glBl||glCp);
+    if(pix){
+      gl.bindFramebuffer(gl.FRAMEBUFFER,fbS);
+      gl.viewport(0,0,PW,PH);
+    } else {
+      gl.viewport(0,0,cv.width,cv.height);
+    }
     gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
     gl.useProgram(glP);
     gl.uniformMatrix4fv(uVP,false,new Float32Array(VPm));
@@ -2228,7 +2273,7 @@ function renderGL(A){
     gl.bindBuffer(gl.ARRAY_BUFFER,glBA); bindAttribs();
     gl.bufferData(gl.ARRAY_BUFFER, BA.subarray(0,BN), gl.DYNAMIC_DRAW);
     gl.drawArrays(gl.TRIANGLES,0,Math.floor(BN/11));
-    /* passe glow nette sur le canevas (occlusion correcte) */
+    /* passe glow */
     gl.useProgram(glP2);
     gl.uniformMatrix4fv(u2VP,false,new Float32Array(VPm));
     gl.uniform3f(u2Cam,EYE[0],EYE[1],EYE[2]);
@@ -2238,22 +2283,26 @@ function renderGL(A){
     gl.bindBuffer(gl.ARRAY_BUFFER,glGA); bindAttribs();
     gl.bufferData(gl.ARRAY_BUFFER, GA.subarray(0,GN), gl.DYNAMIC_DRAW);
     gl.drawArrays(gl.TRIANGLES,0,Math.floor(GN/11));
-    /* bloom : même glow en FBO basse résolution, flouté puis composé */
-    if(fbA&&glPt&&glBl){
-      gl.disable(gl.DEPTH_TEST);
-      gl.bindFramebuffer(gl.FRAMEBUFFER,fbA);
-      gl.clearColor(0,0,0,1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.viewport(0,0,BW,BH);
-      gl.drawArrays(gl.TRIANGLES,0,Math.floor(GN/11));
-      postPass(glPt,txA,1/BW,0,fbB,BW,BH,0);
-      postPass(glPt,txB,0,1/BH,fbA,BW,BH,0);
-      postPass(glBl,txA,0,0,null,cv.width,cv.height,1);
+    if(pix){
+      /* bloom : le glow re-rendu en demi-résolution, flou gaussien 2 passes */
+      if(fbA&&glPt){
+        gl.disable(gl.DEPTH_TEST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER,fbA);
+        gl.clearColor(0,0,0,1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.viewport(0,0,BW,BH);
+        gl.drawArrays(gl.TRIANGLES,0,Math.floor(GN/11));
+        postPass(glPt,txA,1/BW,0,fbB,BW,BH,0);
+        postPass(glPt,txB,0,1/BH,fbA,BW,BH,0);
+      }
+      /* composite plein écran : pixels nets + halo + vignette */
+      compPass((fbA&&glPt&&glBl)?glBl:glCp);
       gl.enableVertexAttribArray(1); gl.enableVertexAttribArray(2);
       gl.enableVertexAttribArray(3); gl.enableVertexAttribArray(4);
       gl.enable(gl.DEPTH_TEST);
       gl.useProgram(glP);
     }
+    /* pas de FBO scène possible : rendu direct canevas avec glow net (dégradé acceptable) */
     gl.depthMask(true); gl.disable(gl.BLEND);
   }catch(e){ try{ gl.bindFramebuffer(gl.FRAMEBUFFER,null); }catch(e2){} }
 }
