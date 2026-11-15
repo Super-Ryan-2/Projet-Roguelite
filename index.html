@@ -347,7 +347,7 @@ cv.addEventListener("webglcontextlost", function(e){
 cv.addEventListener("webglcontextrestored", function(){ location.reload(); });
 
 /* ===== Moteur 3D WebGL (zéro dépendance) ===== */
-var gl=null, GLOK=false, GLERR="", glP=null, glP2=null, glVA=null, glBA=null, glGA=null;
+var gl=null, GLOK=false, GLERR="", GLFB=0, glP=null, glP2=null, glVA=null, glBA=null, glGA=null;
 var uVP=null,uCam=null,uLD=null,uFog=null,uFr=null,uSun=null,uAmbS=null,uAmbG=null,uRim=null,uCon=null,uSat=null,uTint=null;
 var u2VP=null,u2Cam=null,u2Fog=null,u2Fr=null;
 var glPt=null, glBl=null, uBlT=null, uBlDir=null, uCpT=null;
@@ -381,26 +381,47 @@ function initGL(){
     var vsrc="attribute vec3 aP;attribute vec3 aN;attribute vec3 aC;attribute float aL;attribute float aA;uniform mat4 uVP;uniform vec3 uCam;varying vec3 vN;varying vec3 vC;varying vec3 vV;varying float vL;varying float vA;varying float vD;void main(){gl_Position=uVP*vec4(aP,1.0);vN=aN;vC=aC;vV=uCam-aP;vL=aL;vA=aA;vD=distance(aP,uCam);}";
     var fsrc="precision mediump float;varying vec3 vN;varying vec3 vC;varying vec3 vV;varying float vL;varying float vA;varying float vD;uniform vec3 uLD;uniform vec3 uFog;uniform vec2 uFr;uniform vec3 uSun;uniform vec3 uAmbS;uniform vec3 uAmbG;uniform vec3 uRim;uniform float uCon;uniform float uSat;uniform vec3 uTint;void main(){vec3 N=normalize(vN);vec3 V=normalize(vV);float df=max(dot(N,uLD),0.0);vec3 amb=mix(uAmbG,uAmbS,N.y*0.5+0.5);vec3 lit=vC*(amb*1.3+uSun*df);vec3 H=normalize(uLD+V);float sp=pow(max(dot(N,H),0.0),24.0)*0.20*vL;float rim=pow(1.0-abs(dot(N,V)),3.0);vec3 col=mix(vC,lit+uRim*rim*0.22+vec3(sp),vL);col=mix(col,uFog,smoothstep(uFr.x,uFr.y,vD));col=pow(col,vec3(0.92));col=(col-0.5)*uCon+0.5;float lg=dot(col,vec3(0.299,0.587,0.114));col=max(mix(vec3(lg),col,uSat)*uTint,0.0);gl_FragColor=vec4(col,vA);}";
     var fsrc2="precision mediump float;varying vec3 vC;varying float vL;varying float vA;varying float vD;uniform vec3 uFog;uniform vec2 uFr;void main(){float fg=smoothstep(uFr.x,uFr.y,vD);vec3 col=vC*vL*(1.0-fg*0.85);gl_FragColor=vec4(col,vA);}";
+    /* shaders de secours pour GPU mobiles au compilateur GLSL capricieux :
+       niveau 1 = sans spéculaire/rim/grading ; niveau 2 = arithmétique pure */
+    var fsrcS="precision mediump float;varying vec3 vN;varying vec3 vC;varying vec3 vV;varying float vL;varying float vA;varying float vD;uniform vec3 uLD;uniform vec3 uFog;uniform vec2 uFr;uniform vec3 uSun;uniform vec3 uAmbS;uniform vec3 uAmbG;void main(){vec3 N=normalize(vN);float df=max(dot(N,uLD),0.0);vec3 amb=mix(uAmbG,uAmbS,N.y*0.5+0.5);vec3 col=mix(vC,vC*(amb*1.3+uSun*df),vL);col=mix(col,uFog,smoothstep(uFr.x,uFr.y,vD));gl_FragColor=vec4(col,vA);}";
+    var fsrcM="precision mediump float;varying vec3 vC;varying float vA;varying float vD;uniform vec3 uFog;uniform vec2 uFr;void main(){float fg=clamp((vD-uFr.x)/(uFr.y-uFr.x),0.0,1.0);gl_FragColor=vec4(mix(vC,uFog,fg),vA);}";
+    var fsrc2M="precision mediump float;varying vec3 vC;varying float vL;varying float vA;varying float vD;uniform vec3 uFog;uniform vec2 uFr;void main(){float fg=clamp((vD-uFr.x)/(uFr.y-uFr.x),0.0,1.0);gl_FragColor=vec4(vC*vL*(1.0-fg*0.85),vA);}";
+    var glog="";
     function sh(t,sr){
       var o=gl.createShader(t); gl.shaderSource(o,sr); gl.compileShader(o);
       if(!gl.getShaderParameter(o,gl.COMPILE_STATUS)){
-        GLERR="Compilation shader "+(t===gl.VERTEX_SHADER?"vertex":"fragment")+" : "+gl.getShaderInfoLog(o);
+        var m="Compilation shader "+(t===gl.VERTEX_SHADER?"vertex":"fragment")+" : "+String(gl.getShaderInfoLog(o)).slice(0,300);
+        glog+=(glog?" | ":"")+m; GLERR=m;
         return null;
       }
       return o;
     }
     function prog(fs){
+      var v=sh(gl.VERTEX_SHADER,vsrc), f=sh(gl.FRAGMENT_SHADER,fs);
+      if(!v||!f) return null;   /* jamais d'attachShader(null) : crash Chrome Android */
       var p=gl.createProgram();
       gl.bindAttribLocation(p,0,"aP"); gl.bindAttribLocation(p,1,"aN");
       gl.bindAttribLocation(p,2,"aC"); gl.bindAttribLocation(p,3,"aL");
       gl.bindAttribLocation(p,4,"aA");
-      gl.attachShader(p,sh(gl.VERTEX_SHADER,vsrc)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs));
+      gl.attachShader(p,v); gl.attachShader(p,f);
       gl.linkProgram(p);
-      if(!gl.getProgramParameter(p,gl.LINK_STATUS)){ GLERR="Édition de liens du programme : "+gl.getProgramInfoLog(p); return null; }
+      if(!gl.getProgramParameter(p,gl.LINK_STATUS)){ var m2="Édition de liens : "+String(gl.getProgramInfoLog(p)).slice(0,300); glog+=(glog?" | ":"")+m2; GLERR=m2; return null; }
       return p;
     }
-    var p=prog(fsrc), p2=prog(fsrc2);
-    if(!p||!p2) return false;
+    /* chaîne de secours : essayer le shader complet, puis simplifié, puis minimal */
+    var fsrcs=[fsrc, fsrcS, fsrcM];
+    var fsrc2s=[fsrc2, fsrc2M];
+    var p=null, p2=null, li;
+    for(li=0; li<fsrcs.length; li++){
+      p=prog(fsrcs[li]);
+      if(p){ GLFB=li; break; }
+    }
+    for(li=0; li<fsrc2s.length; li++){
+      p2=prog(fsrc2s[li]);
+      if(p2){ break; }
+    }
+    if(!p||!p2){ GLERR=glog||GLERR; return false; }
+    if(GLFB>0){ try{ console.log("[Opération Hadès] shader de secours niveau "+GLFB+" — logs GPU :", glog); }catch(e){} }
     glP=p; glP2=p2;
     gl.useProgram(p);
     aPos=0; aNor=1; aCol=2; aLit=3; aAlp=4;
@@ -419,16 +440,18 @@ function initGL(){
     var fblur="precision mediump float;varying vec2 vUV;uniform sampler2D uT;uniform vec2 uDir;void main(){vec3 c=texture2D(uT,vUV)*0.1633;c+=texture2D(uT,vUV-uDir*4.0)*0.051;c+=texture2D(uT,vUV-uDir*3.0)*0.0918;c+=texture2D(uT,vUV-uDir*2.0)*0.12245;c+=texture2D(uT,vUV-uDir)*0.1531;c+=texture2D(uT,vUV+uDir)*0.1531;c+=texture2D(uT,vUV+uDir*2.0)*0.12245;c+=texture2D(uT,vUV+uDir*3.0)*0.0918;c+=texture2D(uT,vUV+uDir*4.0)*0.051;gl_FragColor=vec4(c,1.0);}";
     var fcomp="precision mediump float;varying vec2 vUV;uniform sampler2D uT;void main(){vec4 c=texture2D(uT,vUV);gl_FragColor=vec4(c.rgb*0.85,1.0);}";
     function progp(fs){
+      var v=sh(gl.VERTEX_SHADER,vpost), f=sh(gl.FRAGMENT_SHADER,fs);
+      if(!v||!f) return null;
       var pp=gl.createProgram();
       gl.bindAttribLocation(pp,0,"aP");
-      gl.attachShader(pp,sh(gl.VERTEX_SHADER,vpost)); gl.attachShader(pp,sh(gl.FRAGMENT_SHADER,fs));
+      gl.attachShader(pp,v); gl.attachShader(pp,f);
       gl.linkProgram(pp);
-      if(!gl.getProgramParameter(pp,gl.LINK_STATUS)) return null;
+      if(!gl.getProgramParameter(pp,gl.LINK_STATUS)){ var m3="Édition de liens post : "+String(gl.getProgramInfoLog(pp)).slice(0,300); glog+=(glog?" | ":"")+m3; GLERR=m3; return null; }
       return pp;
     }
     glPt=progp(fblur); glBl=progp(fcomp);
-    uBlT=gl.getUniformLocation(glPt,"uT"); uBlDir=gl.getUniformLocation(glPt,"uDir");
-    uCpT=gl.getUniformLocation(glBl,"uT");
+    if(glPt){ uBlT=gl.getUniformLocation(glPt,"uT"); uBlDir=gl.getUniformLocation(glPt,"uDir"); }
+    if(glBl){ uCpT=gl.getUniformLocation(glBl,"uT"); }
     quadBuf=gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER,quadBuf);
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, 1,1, -1,-1, 1,1, -1,1]),gl.STATIC_DRAW);
@@ -438,7 +461,7 @@ function initGL(){
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
     gl.clearColor(0.07,0.08,0.05,1);
     return true;
-  }catch(e){ GLERR="Exception à l'init WebGL : "+(e&&e.message?e.message:e); return false; }
+  }catch(e){ GLERR=(GLERR?GLERR+" | ":"")+"Exception à l'init WebGL : "+(e&&e.message?e.message:e); return false; }
 }
 
 /* ---------- Bloom (rendu vers texture quart-résolution + flou gaussien) ---------- */
@@ -1368,6 +1391,7 @@ function explode(x,y,rad,dmg,friendly){
   if(friendly){
     for(var i=enemies.length-1;i>=0;i--){
       var e=enemies[i];
+      if(!e) continue;   /* chaînes d'explosions : le tableau peut se compacter pendant la boucle */
       if(dist2(e.x,e.y,x,y) < (rad+e.r)*(rad+e.r)){
         var d=norm(e.x-x,e.y-y);
         damageEnemy(e, dmg, 10, d[0], d[1]);
@@ -1481,6 +1505,7 @@ function fireEB(x,y,tx,ty,spd,dmg){
 function updateEnemies(dt){
   for(var i=enemies.length-1;i>=0;i--){
     var e=enemies[i];
+    if(!e) continue;   /* kamikaze : splice auto + explosion amicale compactent le tableau pendant l'itération */
     e.flash-=dt; e.hitCd-=dt; e.born-=dt;
     if(e.boss){ updateBoss(e,dt); continue; }
 
@@ -1560,6 +1585,7 @@ function updateEnemies(dt){
     /* séparation */
     for(var j=i-1;j>=0;j--){
       var o=enemies[j];
+      if(!o) continue;
       if(o.boss) continue;
       var ddx=e.x-o.x, ddy=e.y-o.y, dd=Math.hypot(ddx,ddy)||1, min=e.r+o.r;
       if(dd<min){
@@ -2401,6 +2427,7 @@ document.addEventListener("visibilitychange", function(){
 resize();
 GLOK=initGL();
 mkGrain();
+if(GLOK && GLFB>0){ toast("Mode graphique simplifié (shader de secours niveau "+GLFB+")"); }
 if(!GLOK){
   $("glerr").style.display="flex";
   try{ var gdiag=$("glerr-diag"); if(gdiag) gdiag.textContent="Diagnostic : "+(GLERR||"WebGL indisponible sur cet appareil."); }catch(e){}
